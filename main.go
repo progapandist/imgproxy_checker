@@ -20,6 +20,7 @@ import (
 var imageMap = make(map[string][]byte)
 var processedImages = make(map[string]bool)
 var processedImagesLock sync.Mutex
+var downloadMutex sync.Mutex
 
 type imageSizeResult struct {
 	imageURL          string
@@ -34,104 +35,7 @@ func main() {
 
 	http.HandleFunc("/images/", serveImage)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		pageURL := r.URL.Query().Get("url")
-		if pageURL == "" {
-			fmt.Fprintf(w, "Please provide a URL parameter.")
-			return
-		}
-
-		resp, err := http.Get(pageURL)
-		if err != nil {
-			fmt.Fprintf(w, "Error fetching URL: %v", err)
-			return
-		}
-		defer resp.Body.Close()
-
-		doc, err := goquery.NewDocumentFromReader(resp.Body)
-		if err != nil {
-			fmt.Fprintf(w, "Error parsing HTML: %v", err)
-			return
-		}
-
-		imageURLs := extractImageURLs(doc, pageURL)
-
-		// Create a worker pool, a channel for imageURLs, and a channel for results
-		workers := 2
-		imageURLsChan := make(chan string, len(imageURLs))
-		results := make(chan imageSizeResult, len(imageURLs))
-
-		// Distribute imageURLs to the imageURLs channel
-		for _, imageURL := range imageURLs {
-			processedImagesLock.Lock()
-			if !processedImages[imageURL] {
-				processedImages[imageURL] = true
-				imageURLsChan <- imageURL
-			}
-			processedImagesLock.Unlock()
-		}
-		close(imageURLsChan)
-
-		// Start the workers
-		for i := 0; i < workers; i++ {
-			go func() {
-				for imageURL := range imageURLsChan {
-					originalSize, originalSizeError := getImageSize(imageURL)
-					var optimizedSize int
-					var optSizeError error
-
-					if originalSizeError == nil {
-						if strings.HasPrefix(imageURL, "data:") {
-							optimizedImageURL := imageURL
-							optimizedSize, optSizeError = getImageSize(optimizedImageURL)
-						} else {
-							localFilePath, err := downloadImageToLocal(imageURL)
-							if err == nil {
-								defer os.Remove(localFilePath)
-								publicImageURL := fmt.Sprintf("%s/images/%s", ngrokURL, filepath.Base(localFilePath))
-								optimizedImageURL := fmt.Sprintf("https://imgproxy.progapanda.org/unsafe/plain/%s@avif", url.PathEscape(publicImageURL))
-								optimizedSize, optSizeError = getImageSize(optimizedImageURL)
-							}
-						}
-					}
-
-					// Send the result to the channel
-					results <- imageSizeResult{
-						imageURL:          imageURL,
-						originalSize:      originalSize,
-						optimizedSize:     optimizedSize,
-						originalSizeError: originalSizeError,
-						optSizeError:      optSizeError,
-					}
-				}
-			}()
-		}
-
-		// Process the results
-		totalSize := 0
-		optimizedTotalSize := 0
-		for range imageURLs {
-			result := <-results
-			if result.originalSizeError != nil {
-				fmt.Fprintf(w, "Error fetching image size: %v\n", result.originalSizeError)
-				continue
-			}
-			totalSize += result.originalSize
-
-			if result.optSizeError != nil {
-				fmt.Fprintf(w, "Error fetching optimized image size: %v\n", result.optSizeError)
-				continue
-			}
-			optimizedTotalSize += result.optimizedSize
-
-			fmt.Fprintf(w, "Image URL: %s, Original Size: %d bytes, Optimized Size: %d bytes\n", result.imageURL, result.originalSize, result.optimizedSize)
-		}
-
-		fmt.Fprintf(w, "\nTotal image size: %d bytes\n", totalSize)
-		fmt.Fprintf(w, "Total optimized image size: %d bytes\n", optimizedTotalSize)
-		fmt.Fprintf(w, "Size difference: %d bytes\n", totalSize-optimizedTotalSize)
-
-		fmt.Fprintf(w, "\nLoading times for different connection speeds (Original / Optimized):\n")
-		printLoadingTimes(w, totalSize, optimizedTotalSize)
+		handleURL(w, r, ngrokURL)
 	})
 
 	fmt.Println("Server listening on http://localhost:8080")
@@ -139,6 +43,106 @@ func main() {
 	if err != nil {
 		fmt.Println("Error starting server:", err)
 	}
+}
+
+func handleURL(w http.ResponseWriter, r *http.Request, ngrokURL string) {
+	pageURL := r.URL.Query().Get("url")
+	if pageURL == "" {
+		fmt.Fprintf(w, "Please provide a URL parameter.")
+		return
+	}
+
+	resp, err := http.Get(pageURL)
+	if err != nil {
+		fmt.Fprintf(w, "Error fetching URL: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		fmt.Fprintf(w, "Error parsing HTML: %v", err)
+		return
+	}
+
+	imageURLs := extractImageURLs(doc, pageURL)
+
+	// Create a worker pool, a channel for imageURLs, and a channel for results
+	workers := 5
+	imageURLsChan := make(chan string, len(imageURLs))
+	results := make(chan imageSizeResult, len(imageURLs))
+
+	// Distribute imageURLs to the imageURLs channel
+	for _, imageURL := range imageURLs {
+		processedImagesLock.Lock()
+		if !processedImages[imageURL] {
+			processedImages[imageURL] = true
+			imageURLsChan <- imageURL
+		}
+		processedImagesLock.Unlock()
+	}
+	close(imageURLsChan)
+
+	// Start the workers
+	for i := 0; i < workers; i++ {
+		go func() {
+			for imageURL := range imageURLsChan {
+				originalSize, originalSizeError := getImageSize(imageURL)
+				var optimizedSize int
+				var optSizeError error
+
+				if originalSizeError == nil {
+					if strings.HasPrefix(imageURL, "data:") {
+						optimizedImageURL := imageURL
+						optimizedSize, optSizeError = getImageSize(optimizedImageURL)
+					} else {
+						localFilePath, err := downloadImageToLocal(imageURL)
+						if err == nil {
+							publicImageURL := fmt.Sprintf("%s/images/%s", ngrokURL, filepath.Base(localFilePath))
+							optimizedImageURL := fmt.Sprintf("https://imgproxy.progapanda.org/unsafe/plain/%s@avif", url.PathEscape(publicImageURL))
+							optimizedSize, optSizeError = getImageSize(optimizedImageURL)
+							os.Remove(localFilePath) // Remove the temporary file after getting the optimized image size
+						}
+					}
+				}
+
+				// Send the result to the channel
+				results <- imageSizeResult{
+					imageURL:          imageURL,
+					originalSize:      originalSize,
+					optimizedSize:     optimizedSize,
+					originalSizeError: originalSizeError,
+					optSizeError:      optSizeError,
+				}
+			}
+		}()
+	}
+	// Process the results
+	totalSize := 0
+	optimizedTotalSize := 0
+	for range imageURLs {
+		result := <-results
+		if result.originalSizeError != nil {
+			fmt.Fprintf(w, "Error fetching image size: %v\n", result.originalSizeError)
+			continue
+		}
+		totalSize += result.originalSize
+
+		if result.optSizeError != nil {
+			fmt.Fprintf(w, "Error fetching optimized image size: %v\n", result.optSizeError)
+			continue
+		}
+		optimizedTotalSize += result.optimizedSize
+
+		fmt.Fprintf(w, "Image URL: %s, Original Size: %d bytes, Optimized Size: %d bytes\n", result.imageURL, result.originalSize, result.optimizedSize)
+	}
+
+	fmt.Fprintf(w, "\nTotal image size: %d bytes\n", totalSize)
+	fmt.Fprintf(w, "Total optimized image size: %d bytes\n", optimizedTotalSize)
+	fmt.Fprintf(w, "Size difference: %d bytes\n", totalSize-optimizedTotalSize)
+
+	fmt.Fprintf(w, "\nLoading times for different connection speeds (Original / Optimized):\n")
+	printLoadingTimes(w, totalSize, optimizedTotalSize)
 }
 
 func extractImageURLs(doc *goquery.Document, baseURL string) []string {
@@ -273,6 +277,10 @@ func downloadImageToLocal(imageURL string) (string, error) {
 	}
 
 	tmpFile.Close()
+
+	downloadMutex.Lock()
 	imageMap[filepath.Base(tmpFile.Name())] = content
+	downloadMutex.Unlock()
+
 	return filepath.Abs(tmpFile.Name())
 }
