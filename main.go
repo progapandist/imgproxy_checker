@@ -11,12 +11,23 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
 
 var imageMap = make(map[string][]byte)
+var processedImages = make(map[string]bool)
+var processedImagesLock sync.Mutex
+
+type imageSizeResult struct {
+	imageURL          string
+	originalSize      int
+	optimizedSize     int
+	originalSizeError error
+	optSizeError      error
+}
 
 func main() {
 	ngrokURL := "https://progapanda.ngrok.app/" // Replace with your ngrok URL
@@ -43,43 +54,76 @@ func main() {
 		}
 
 		imageURLs := extractImageURLs(doc, pageURL)
+
+		// Create a worker pool, a channel for imageURLs, and a channel for results
+		workers := 2
+		imageURLsChan := make(chan string, len(imageURLs))
+		results := make(chan imageSizeResult, len(imageURLs))
+
+		// Distribute imageURLs to the imageURLs channel
+		for _, imageURL := range imageURLs {
+			processedImagesLock.Lock()
+			if !processedImages[imageURL] {
+				processedImages[imageURL] = true
+				imageURLsChan <- imageURL
+			}
+			processedImagesLock.Unlock()
+		}
+		close(imageURLsChan)
+
+		// Start the workers
+		for i := 0; i < workers; i++ {
+			go func() {
+				for imageURL := range imageURLsChan {
+					originalSize, originalSizeError := getImageSize(imageURL)
+					var optimizedSize int
+					var optSizeError error
+
+					if originalSizeError == nil {
+						if strings.HasPrefix(imageURL, "data:") {
+							optimizedImageURL := imageURL
+							optimizedSize, optSizeError = getImageSize(optimizedImageURL)
+						} else {
+							localFilePath, err := downloadImageToLocal(imageURL)
+							if err == nil {
+								defer os.Remove(localFilePath)
+								publicImageURL := fmt.Sprintf("%s/images/%s", ngrokURL, filepath.Base(localFilePath))
+								optimizedImageURL := fmt.Sprintf("https://imgproxy.progapanda.org/unsafe/plain/%s@avif", url.PathEscape(publicImageURL))
+								optimizedSize, optSizeError = getImageSize(optimizedImageURL)
+							}
+						}
+					}
+
+					// Send the result to the channel
+					results <- imageSizeResult{
+						imageURL:          imageURL,
+						originalSize:      originalSize,
+						optimizedSize:     optimizedSize,
+						originalSizeError: originalSizeError,
+						optSizeError:      optSizeError,
+					}
+				}
+			}()
+		}
+
+		// Process the results
 		totalSize := 0
 		optimizedTotalSize := 0
-		for _, imageURL := range imageURLs {
-			size, err := getImageSize(imageURL)
-			if err != nil {
-				fmt.Fprintf(w, "Error fetching image size: %v\n", err)
+		for range imageURLs {
+			result := <-results
+			if result.originalSizeError != nil {
+				fmt.Fprintf(w, "Error fetching image size: %v\n", result.originalSizeError)
 				continue
 			}
-			totalSize += size
+			totalSize += result.originalSize
 
-			var optimizedSize int
-			if strings.HasPrefix(imageURL, "data:") {
-				optimizedImageURL := imageURL // Keep the data URI as is for optimization
-				optimizedSize, err = getImageSize(optimizedImageURL)
-				if err != nil {
-					fmt.Fprintf(w, "Error fetching optimized image size: %v\n", err)
-					continue
-				}
-				optimizedTotalSize += optimizedSize
-			} else {
-				localFilePath, err := downloadImageToLocal(imageURL)
-				if err != nil {
-					fmt.Fprintf(w, "Error downloading image to local: %v\n", err)
-					continue
-				}
-				defer os.Remove(localFilePath) // Clean up the temporary file
-				publicImageURL := fmt.Sprintf("%s/images/%s", ngrokURL, filepath.Base(localFilePath))
-				optimizedImageURL := fmt.Sprintf("https://imgproxy.progapanda.org/unsafe/plain/%s@avif", url.PathEscape(publicImageURL))
-				optimizedSize, err = getImageSize(optimizedImageURL)
-				if err != nil {
-					fmt.Fprintf(w, "Error fetching optimized image size: %v\n", err)
-					continue
-				}
-				optimizedTotalSize += optimizedSize
+			if result.optSizeError != nil {
+				fmt.Fprintf(w, "Error fetching optimized image size: %v\n", result.optSizeError)
+				continue
 			}
+			optimizedTotalSize += result.optimizedSize
 
-			fmt.Fprintf(w, "Image URL: %s, Original Size: %d bytes, Optimized Size: %d bytes\n", imageURL, size, optimizedSize)
+			fmt.Fprintf(w, "Image URL: %s, Original Size: %d bytes, Optimized Size: %d bytes\n", result.imageURL, result.originalSize, result.optimizedSize)
 		}
 
 		fmt.Fprintf(w, "\nTotal image size: %d bytes\n", totalSize)
@@ -91,7 +135,10 @@ func main() {
 	})
 
 	fmt.Println("Server listening on http://localhost:8080")
-	http.ListenAndServe("localhost:8080", nil)
+	err := http.ListenAndServe("localhost:8080", nil)
+	if err != nil {
+		fmt.Println("Error starting server:", err)
+	}
 }
 
 func extractImageURLs(doc *goquery.Document, baseURL string) []string {
