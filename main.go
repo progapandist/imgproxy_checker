@@ -52,7 +52,18 @@ func handleURL(w http.ResponseWriter, r *http.Request, ngrokURL string) {
 		return
 	}
 
-	resp, err := http.Get(pageURL)
+	maxRedirects := 10
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxRedirects {
+				return fmt.Errorf("Stopped after %d redirects", maxRedirects)
+			}
+			return nil
+		},
+	}
+
+	resp, err := client.Get(pageURL)
 	if err != nil {
 		fmt.Fprintf(w, "Error fetching URL: %v", err)
 		return
@@ -254,7 +265,18 @@ func serveImage(w http.ResponseWriter, r *http.Request) {
 }
 
 func downloadImageToLocal(imageURL string) (string, error) {
-	resp, err := http.Get(imageURL)
+	maxRedirects := 10
+
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxRedirects {
+				return fmt.Errorf("Stopped after %d redirects", maxRedirects)
+			}
+			return nil
+		},
+	}
+
+	resp, err := client.Get(imageURL)
 	if err != nil {
 		return "", err
 	}
