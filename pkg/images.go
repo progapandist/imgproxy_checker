@@ -211,7 +211,7 @@ func fetchAndParsePage(pageURL string) ([]string, time.Duration) {
 	page.MustClose()
 
 	// Set the limit to how long we simalate scrolling for
-	scrollDuration := 1 * time.Second
+	scrollDuration := 3 * time.Second
 	return imageURLs, scrollDuration
 }
 
