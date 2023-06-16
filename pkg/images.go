@@ -10,11 +10,9 @@ import (
 )
 
 type imageSizeResult struct {
-	imageURL          string
-	originalSize      int
-	optimizedSize     int
-	originalSizeError error
-	optSizeError      error
+	imageURL      string
+	originalSize  int
+	optimizedSize int
 }
 
 func FetchAndProcessImages(pageURL string) ([]imageSizeResult, int, int) {
@@ -25,22 +23,49 @@ func FetchAndProcessImages(pageURL string) ([]imageSizeResult, int, int) {
 	totalOriginalSize := 0
 	totalOptimizedSize := 0
 
-	for _, imageURL := range imageURLs {
-		originalSize, originalSizeError := getImageSize(imageURL)
-		var optimizedSize int
-		var optSizeError error
+	db, err := initDB()
+	if err != nil {
+		fmt.Printf("Error initializing database: %v\n", err)
+		return nil, 0, 0
+	}
+	defer db.Close()
 
-		if originalSizeError == nil {
-			optimizedImageURL := fmt.Sprintf("https://imgproxy.progapanda.org/unsafe/plain/%s@avif", url.PathEscape(imageURL))
-			optimizedSize, optSizeError = getImageSize(optimizedImageURL)
+	for _, imageURL := range imageURLs {
+		// Check if image data exists in the database
+		existingData, err := getImageDataByURL(db, pageURL, imageURL)
+		if err != nil {
+			fmt.Printf("Error querying image data from the database: %v\n", err)
+			continue
 		}
 
-		result := imageSizeResult{
-			imageURL:          imageURL,
-			originalSize:      originalSize,
-			optimizedSize:     optimizedSize,
-			originalSizeError: originalSizeError,
-			optSizeError:      optSizeError,
+		var result imageSizeResult
+		if existingData == nil {
+			originalSize, originalSizeError := getImageSize(imageURL)
+			var optimizedSize int
+			var optSizeError error
+
+			if originalSizeError == nil {
+				optimizedImageURL := fmt.Sprintf("https://imgproxy.progapanda.org/unsafe/plain/%s@avif", url.PathEscape(imageURL))
+				optimizedSize, optSizeError = getImageSize(optimizedImageURL)
+			}
+
+			if originalSizeError != nil || optSizeError != nil {
+				fmt.Printf("Error processing image %s: originalSizeError=%v, optSizeError=%v\n", imageURL, originalSizeError, optSizeError)
+				continue
+			}
+
+			result = imageSizeResult{
+				imageURL:      imageURL,
+				originalSize:  originalSize,
+				optimizedSize: optimizedSize,
+			}
+
+			_, err := insertImageData(db, pageURL, result)
+			if err != nil {
+				fmt.Printf("Error inserting image data into the database: %v\n", err)
+			}
+		} else {
+			result = *existingData
 		}
 
 		results = append(results, result)
