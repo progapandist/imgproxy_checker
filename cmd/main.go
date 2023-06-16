@@ -8,11 +8,9 @@ import (
 )
 
 func main() {
-	ngrokURL := "https://progapanda.ngrok.app/" // Replace with your ngrok URL
 
-	http.HandleFunc("/images/", pkg.ServeImage)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		pkg.HandleURL(w, r, ngrokURL)
+		pkg.HandleURL(w, r)
 	})
 
 	fmt.Println("Server listening on http://localhost:8080")
