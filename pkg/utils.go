@@ -26,14 +26,15 @@ func isValidImageURL(src string) bool {
 	}
 
 	// Check if the URL starts with "http" or "https"
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+	if parsedURL.Scheme == "" {
 		return false
 	}
 
-	// Check if the URL has a valid image extension
+	// Check if the URL has a valid image extension excluding SVGs
 	imagePattern := regexp.MustCompile(`\.(jpg|jpeg|png|gif|webp|bmp|tiff|avif)$`)
 	return !strings.HasPrefix(src, "data:") && !strings.HasSuffix(parsedURL.Path, ".svg") && imagePattern.MatchString(parsedURL.Path)
 }
+
 func extractImageURLs(doc *goquery.Document, baseURL string) []string {
 	var imageURLs []string
 

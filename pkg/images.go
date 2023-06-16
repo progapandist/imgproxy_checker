@@ -5,9 +5,12 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
+	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/launcher"
 )
 
 type imageSizeResult struct {
@@ -33,6 +36,10 @@ func FetchAndProcessImages(pageURL string) ([]imageSizeResult, int, int) {
 	defer db.Close()
 
 	for _, imageURL := range imageURLs {
+		// Check if URL is valid
+		if !isValidImageURL(imageURL) {
+			continue
+		}
 		// Check if image data exists in the database
 		existingData, err := getImageDataByURL(db, pageURL, imageURL)
 		if err != nil {
@@ -81,7 +88,26 @@ func FetchAndProcessImages(pageURL string) ([]imageSizeResult, int, int) {
 }
 
 func getImageSize(imageURL string) (int, error) {
-	resp, err := http.Get(imageURL)
+	resp, err := http.Head(imageURL)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("failed to get image: %s", resp.Status)
+	}
+
+	contentLength := resp.Header.Get("Content-Length")
+	if contentLength != "" {
+		size, err := strconv.ParseInt(contentLength, 10, 64)
+		if err == nil {
+			return int(size), nil
+		}
+	}
+
+	// Fallback to GET request if Content-Length header is missing or invalid
+	resp, err = http.Get(imageURL)
 	if err != nil {
 		return 0, err
 	}
@@ -96,16 +122,72 @@ func getImageSize(imageURL string) (int, error) {
 }
 
 func fetchAndParsePage(pageURL string) []string {
-	resp, err := http.Get(pageURL)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
+	urls := []string{}
 
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil
+	browser := rod.New().ControlURL(launcher.New().MustLaunch()).MustConnect()
+	defer browser.MustClose()
+
+	page := browser.MustPage(pageURL)
+	defer page.MustClose()
+
+	page.MustWaitLoad()
+	imgElements := page.MustElements("img")
+
+	for _, img := range imgElements {
+		src, _ := img.Attribute("src")
+		if src != nil && *src != "" {
+			urls = append(urls, *src)
+		}
 	}
 
-	return extractImageURLs(doc, pageURL)
+	// Fetch background images from inline styles and external stylesheets
+	bgImagesJSON := page.MustEval(`() => {
+		try {
+			return Array.from(document.querySelectorAll("*")).map(el => {
+				const style = getComputedStyle(el);
+				const bgImage = style.backgroundImage;
+				const match = bgImage.match(/url\\(['"]?(.*?)['"]?\\)/);
+				return match ? match[1] : null;
+			}).filter(url => url !== null);
+		} catch (error) {
+			console.error("Error fetching background images:", error);
+			return [];
+		}
+	}`)
+
+	// Fetch images from JavaScript
+	jsCode := `
+	() => {
+		try {
+			return Array.from(document.querySelectorAll("script[src]")).flatMap(script => {
+				const regex = /['"]((?:https?:)?\/\/[^'"]+\\.(?:jpg|jpeg|png|gif|webp|bmp|tiff|avif)(?:\\?[^'"]*)?)['"]/ig;
+				return Array.from(script.textContent.matchAll(regex)).map(match => match[1]);
+			}).filter(url => url);
+		} catch (error) {
+			console.error("Error fetching JS images:", error);
+			return [];
+		}
+	}`
+	re := regexp.MustCompile(`\\\\`)
+	jsCode = re.ReplaceAllString(jsCode, "\\")
+
+	jsImagesJSON := page.MustEval(jsCode)
+
+	var bgImages []interface{}
+	err := bgImagesJSON.Unmarshal(&bgImages)
+	if err == nil {
+		for _, bgImage := range bgImages {
+			urls = append(urls, bgImage.(string))
+		}
+	}
+
+	var jsImages []interface{}
+	err = jsImagesJSON.Unmarshal(&jsImages)
+	if err == nil {
+		for _, jsImage := range jsImages {
+			urls = append(urls, jsImage.(string))
+		}
+	}
+
+	return urls
 }
