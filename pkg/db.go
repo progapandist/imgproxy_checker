@@ -18,9 +18,10 @@ func initDB() (*sql.DB, error) {
 		page_url TEXT NOT NULL,
 		image_url TEXT NOT NULL,
 		original_size INTEGER,
-		optimized_size INTEGER
+		optimized_size INTEGER,
+		timestamp INTEGER -- Add a timestamp field
 	);
-`
+	`
 	_, err = db.Exec(createTableQuery)
 	if err != nil {
 		return nil, err
@@ -31,11 +32,11 @@ func initDB() (*sql.DB, error) {
 
 func insertImageData(db *sql.DB, pageURL string, result imageSizeResult) (int64, error) {
 	insertQuery := `
-		INSERT INTO image_data (page_url, image_url, original_size, optimized_size)
-		VALUES (?, ?, ?, ?);
+		INSERT INTO image_data (page_url, image_url, original_size, optimized_size, timestamp)
+		VALUES (?, ?, ?, ?, ?);
 	`
 
-	res, err := db.Exec(insertQuery, pageURL, result.imageURL, result.originalSize, result.optimizedSize)
+	res, err := db.Exec(insertQuery, pageURL, result.imageURL, result.originalSize, result.optimizedSize, result.timestamp)
 	if err != nil {
 		return 0, err
 	}
@@ -45,7 +46,7 @@ func insertImageData(db *sql.DB, pageURL string, result imageSizeResult) (int64,
 
 func getImageDataByURL(db *sql.DB, pageURL string, imageURL string) (*imageSizeResult, error) {
 	query := `
-		SELECT original_size, optimized_size
+		SELECT original_size, optimized_size, timestamp
 		FROM image_data
 		WHERE page_url = ? AND image_url = ?;
 	`
@@ -53,7 +54,7 @@ func getImageDataByURL(db *sql.DB, pageURL string, imageURL string) (*imageSizeR
 	row := db.QueryRow(query, pageURL, imageURL)
 
 	var result imageSizeResult
-	err := row.Scan(&result.originalSize, &result.optimizedSize)
+	err := row.Scan(&result.originalSize, &result.optimizedSize, &result.timestamp)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {

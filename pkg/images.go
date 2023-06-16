@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
@@ -13,6 +14,7 @@ type imageSizeResult struct {
 	imageURL      string
 	originalSize  int
 	optimizedSize int
+	timestamp     int64 // Add a timestamp field
 }
 
 func FetchAndProcessImages(pageURL string) ([]imageSizeResult, int, int) {
@@ -39,7 +41,8 @@ func FetchAndProcessImages(pageURL string) ([]imageSizeResult, int, int) {
 		}
 
 		var result imageSizeResult
-		if existingData == nil {
+		now := time.Now().Unix()
+		if existingData == nil || now-existingData.timestamp > 24*60*60 { // Refetch if more than 24 hours have passed
 			originalSize, originalSizeError := getImageSize(imageURL)
 			var optimizedSize int
 			var optSizeError error
@@ -58,6 +61,7 @@ func FetchAndProcessImages(pageURL string) ([]imageSizeResult, int, int) {
 				imageURL:      imageURL,
 				originalSize:  originalSize,
 				optimizedSize: optimizedSize,
+				timestamp:     now, // Add the current timestamp
 			}
 
 			_, err := insertImageData(db, pageURL, result)
