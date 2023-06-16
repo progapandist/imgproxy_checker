@@ -15,7 +15,7 @@ func HandleURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, totalOriginalSize, totalOptimizedSize := FetchAndProcessImages(pageURL)
+	results, totalOriginalSize, totalOptimizedSize, numImages, scrollDuration := FetchAndProcessImages(pageURL)
 
 	// Output the results
 	for _, result := range results {
@@ -27,6 +27,8 @@ func HandleURL(w http.ResponseWriter, r *http.Request) {
 	// Calculate loading times
 	loadingTimes := calculateLoadingTimes(totalOriginalSize, totalOptimizedSize)
 	_, _ = fmt.Fprintf(w, "\nLoading times for different connection speeds (Original / Optimized):\n2G: %.2f seconds / %.2f seconds\n3G: %.2f seconds / %.2f seconds\n4G: %.2f seconds / %.2f seconds\nWifi: %.2f seconds / %.2f seconds\n", loadingTimes["2g"].original, loadingTimes["2g"].optimized, loadingTimes["3g"].original, loadingTimes["3g"].optimized, loadingTimes["4g"].original, loadingTimes["4g"].optimized, loadingTimes["wifi"].original, loadingTimes["wifi"].optimized)
+
+	_, _ = fmt.Fprintf(w, "\nNumber of images processed: %d\nScroll duration: %s\n", numImages, scrollDuration)
 
 	_, _ = fmt.Fprintf(w, "\nOriginal URL: %s\nProcessing time: %s", pageURL, time.Since(startTime))
 }
