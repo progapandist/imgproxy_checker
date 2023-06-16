@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -163,7 +164,7 @@ func fetchAndParsePage(pageURL string) ([]string, time.Duration) {
 
 	launcher := launcher.New().
 		Set("disable-web-security", "true").
-		Headless(true)
+		Headless(false) // DEBUG! Set to true for production
 	browser := rod.New().ControlURL(launcher.MustLaunch()).MustConnect()
 	defer browser.MustClose()
 
@@ -231,54 +232,68 @@ func FetchAndProcessImages(pageURL string) ([]imageSizeResult, int, int, int, ti
 	}
 	defer db.Close()
 
+	var wg sync.WaitGroup
+	resultChan := make(chan imageSizeResult, numImages)
+
 	for _, imageURL := range imageURLs {
 		if !isValidImageURL(imageURL) {
 			fmt.Printf("Skipping invalid image URL: %s\n", imageURL)
 			continue
 		}
-		existingData, err := getImageDataByURL(db, pageURL, imageURL)
-		if err != nil {
-			fmt.Printf("Error querying image data from the database: %v\n", err)
-			continue
-		}
-
-		var result imageSizeResult
-		now := time.Now().Unix()
-		if existingData == nil || now-existingData.timestamp > 24*60*60 {
-			originalSize, originalSizeError := getImageSize(imageURL)
-			var optimizedSize int
-			var optSizeError error
-
-			if originalSizeError == nil {
-				optimizedImageURL := fmt.Sprintf("https://imgproxy.progapanda.org/unsafe/plain/%s@avif", url.PathEscape(imageURL))
-				optimizedSize, optSizeError = getImageSize(optimizedImageURL)
-			}
-
-			if originalSizeError != nil || optSizeError != nil {
-				fmt.Printf("Error processing image %s: originalSizeError=%v, optSizeError=%v\n", imageURL, originalSizeError, optSizeError)
-				continue
-			}
-
-			result = imageSizeResult{
-				imageURL:      imageURL,
-				originalSize:  originalSize,
-				optimizedSize: optimizedSize,
-				timestamp:     now,
-			}
-
-			_, err := insertImageData(db, pageURL, result)
+		wg.Add(1)
+		go func(imageURL string) {
+			defer wg.Done()
+			existingData, err := getImageDataByURL(db, pageURL, imageURL)
 			if err != nil {
-				fmt.Printf("Error inserting image data into the database: %v\n", err)
+				fmt.Printf("Error querying image data from the database: %v\n", err)
+				return
 			}
-		} else {
-			result = *existingData
-		}
 
+			var result imageSizeResult
+			now := time.Now().Unix()
+			if existingData == nil || now-existingData.timestamp > 24*60*60 {
+				originalSize, originalSizeError := getImageSize(imageURL)
+				var optimizedSize int
+				var optSizeError error
+
+				if originalSizeError == nil {
+					optimizedImageURL := fmt.Sprintf("https://imgproxy.progapanda.org/unsafe/plain/%s@avif", url.PathEscape(imageURL))
+					optimizedSize, optSizeError = getImageSize(optimizedImageURL)
+				}
+
+				if originalSizeError != nil || optSizeError != nil {
+					fmt.Printf("Error processing image %s: originalSizeError=%v, optSizeError=%v\n", imageURL, originalSizeError, optSizeError)
+					return
+				}
+
+				result = imageSizeResult{
+					imageURL:      imageURL,
+					originalSize:  originalSize,
+					optimizedSize: optimizedSize,
+					timestamp:     now,
+				}
+
+				_, err := insertImageData(db, pageURL, result)
+				if err != nil {
+					fmt.Printf("Error inserting image data into the database: %v\n", err)
+				}
+			} else {
+				result = *existingData
+			}
+
+			resultChan <- result
+		}(imageURL)
+	}
+
+	wg.Wait()
+	close(resultChan)
+
+	for result := range resultChan {
 		results = append(results, result)
 		totalOriginalSize += result.originalSize
 		totalOptimizedSize += result.optimizedSize
 
-		fmt.Printf("Processed image %s: Original Size: %d bytes, Optimized Size: %d bytes\n", imageURL, result.originalSize, result.optimizedSize)
+		fmt.Printf("Processed image %s: Original Size: %d bytes, Optimized Size: %d bytes\n", result.imageURL, result.originalSize, result.optimizedSize)
 	}
 
 	return results, totalOriginalSize, totalOptimizedSize, numImages, scrollDuration
